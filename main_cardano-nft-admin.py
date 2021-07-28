@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+'''
+    I have not yet found a way to run a node via docker and have the node.socket available to anything other than root.
+    For this reason this script still requires root privileges.
+'''
 import random
 import os
 import json
@@ -37,14 +41,187 @@ def main():
     if not os.path.exists(config.WORKING_DIRECTORY):
         os.makedirs(config.WORKING_DIRECTORY)
 
-    create_wallet()
+    wallet_data = create_wallet()
 
-def get_execution_environment():
-    env = os.environ.copy()
-    env["CARDANO_NODE_SOCKET_PATH"] = config.NODE_IPC
-    return env
+    utxos = query_wallet({'payment_addr':'addr_test1qzzr7yxw4skhe2p53fq4at50jmnmq27u9duwfry83ry4arz88xalyhy8ftlmgvvceyv3geglxp5vgwnlq76p9k4v9lfqvh4f4g'})
+
+    print("UTXOS:", json.dumps(utxos, indent=4))
+
+    protocol = get_network_protocol()
+    print("Protocol:", json.dumps(protocol, indent=4))
+
+    policy_keys = create_policy_keys()
+    print("Policy Keys:", json.dumps(policy_keys, indent=4))
+
+    policy_script = create_policy_script(policy_keys['policy_vkey'], before=12345678)
+    print("Policy script:", json.dumps(policy_script, indent=4))
+
+    policy_id = calculate_policy_id(policy_script)
+    print("Policy ID:", policy_id)
+
+def setup():
+    '''
+        Ensure that the working directory is created and usable
+        Ensure that the database connection is working
+        Ensure that the database schema is correct
+    '''
+    pass
+
+# TODO:
+#   - implement minting, make sure all params are required
+#   - Add documentation
+#   - refactor into multiple files, this is getting out of hand.
+#   - start to persist data in a database
+#   - implement the setup function
+    
+def calculate_policy_id(policy_script):
+    # The main data we'll return as output
+    policy_id = ''
+
+    # To avoid collisions a large random hexstring is prepended to filenames
+    random_id = create_random_id()
+
+    with open(f'{config.WORKING_DIRECTORY}/{random_id}_policy.script', 'w') as f_out:
+        json.dump(policy_script, f_out, indent=4)
+
+    completed = subprocess.run(
+        [
+            config.CLI_PATH,
+            "transaction",
+            "policyid",
+            "--script-file",
+            f'{config.WORKING_DIRECTORY}/{random_id}_policy.script',
+        ],
+        check=True,
+        env=get_execution_environment(),
+        capture_output=True,
+    )
+
+    policy_id = completed.stdout.decode().strip()
+
+    # CLEANUP
+    cleanup_files = ['policy.script']
+    cleanup(random_id, cleanup_files)
+
+    return policy_id
+
+
+def get_network_protocol():
+    # The main data we'll return as output
+    protocol = {}
+
+    # To avoid collisions a large random hexstring is prepended to filenames
+    random_id = create_random_id()
+
+    # TODO: The above code is copied to multiple methods, there may be a better way.
+    completed = subprocess.run(
+        [
+            config.CLI_PATH,
+            "query",
+            "protocol-parameters",
+            "--out-file",
+            f'{config.WORKING_DIRECTORY}/{random_id}_protocol.json',
+            *get_network_param()
+        ],
+        check=True,
+        env=get_execution_environment(),
+    )
+
+    with open(f'{config.WORKING_DIRECTORY}/{random_id}_protocol.json') as f_in:
+        protocol = json.load(f_in)
+    
+    # CLEANUP
+    cleanup_files = ['protocol.json']
+    cleanup(random_id, cleanup_files)
+
+    return protocol
+
+    
+def query_wallet(wallet):
+    # The main data we'll return as output
+    utxos = {}
+
+    # To avoid collisions a large random hexstring is prepended to filenames
+    random_id = create_random_id()
+
+    # TODO: The above code is copied to multiple methods, there may be a better way.
+    try:
+        completed = subprocess.run(
+            [
+                config.CLI_PATH,
+                "query",
+                "utxo",
+                "--address",
+                wallet['payment_addr'],
+                "--out-file",
+                f'{config.WORKING_DIRECTORY}/{random_id}_utxos.json',
+                *get_network_param(),
+            ],
+            check=True,
+            env=get_execution_environment(),
+        )
+    except subprocess.CalledProcessError as exception:
+        logger.critical("Could not query wallet. Do you have permission to access the node.socket?")
+        if not config.MAINNET:
+            logger.warn("This could be caused by a mismatch in testnet magic")
+        raise exception
+
+    with open(f'{config.WORKING_DIRECTORY}/{random_id}_utxos.json') as f_in:
+        utxos = json.load(f_in)
+    
+    # CLEANUP
+    cleanup_files = ['utxos.json']
+    cleanup(random_id, cleanup_files)
+
+    return utxos
     
 
+def create_policy_script(policy_vkey, before=-1, after=-1):
+    # Main data structure to be filled using CLI commands
+    policy_script = {
+        "type":"all",
+        "scripts": [
+        ],
+    }
+
+    # To avoid collisions a large random hexstring is prepended to filenames
+    random_id = create_random_id()
+
+    if not before < 0:
+        policy_script['scripts'].append({"slot":before, "type":"before"})
+
+    if not after < 0:
+        policy_script['scripts'].append({"slot":before, "type":"after"})
+
+    keyHash = ''
+
+    with open(f'{config.WORKING_DIRECTORY}/{random_id}_policy.vkey', 'w') as f_out:
+        json.dump(policy_vkey, f_out, indent=4)
+
+    subprocess.run(
+        [
+            config.CLI_PATH,
+            "address",
+            "key-hash",
+            "--payment-verification-key-file",
+            f'{config.WORKING_DIRECTORY}/{random_id}_policy.vkey',
+            "--out-file",
+            f'{config.WORKING_DIRECTORY}/{random_id}_policy.hash',
+        ],
+        check=True,
+        env=get_execution_environment(),
+    )
+
+    with open(f'{config.WORKING_DIRECTORY}/{random_id}_policy.hash') as f_in:
+        keyHash = f_in.read().strip()
+
+    policy_script['scripts'].append({'keyHash':keyHash, 'type':'sig'})
+
+    # CLEANUP
+    cleanup_files = ['policy.vkey', 'policy.hash']
+    cleanup(random_id, cleanup_files)
+
+    return policy_script
 
 def create_wallet():
     # Main data structure to be filled using CLI commands
@@ -57,18 +234,7 @@ def create_wallet():
     }
 
     # To avoid collisions a large random hexstring is prepended to filenames
-    random_id = hex(random.getrandbits(16**2))[2:]
-
-    # In order to properly execute, the cardano-node needs to have the socket path as an environment variable
-    env = get_execution_environment()
-
-    # Depending on the configuration we'll either need to provide:
-    # the "--mainnet" flag or
-    # the "--testnet-magic TESTNETMAGIC" parameter
-    if config.MAINNET:
-        network_param = ["--mainnet"]
-    else:
-        network_param  = ["--testnet-magic", "42"]
+    random_id = create_random_id()
 
     # Create Staking Keys
     logger.debug(f"Start generating staking keys for ID {random_id}")
@@ -83,7 +249,7 @@ def create_wallet():
             f"{config.WORKING_DIRECTORY}/{random_id}_stake.skey",
         ],
         check=True,
-        env=env,
+        env=get_execution_environment(),
     )
     with open(f'{config.WORKING_DIRECTORY}/{random_id}_stake.vkey') as f_in:
         wallet_data['staking_vkey'] = json.load(f_in)
@@ -104,7 +270,7 @@ def create_wallet():
             f'{config.WORKING_DIRECTORY}/{random_id}_payment.skey',
         ],
         check=True,
-        env=env
+        env=get_execution_environment()
     )
     with open(f'{config.WORKING_DIRECTORY}/{random_id}_payment.vkey') as f_in:
         wallet_data['payment_vkey'] = json.load(f_in)
@@ -126,10 +292,10 @@ def create_wallet():
             f'{config.WORKING_DIRECTORY}/{random_id}_stake.vkey',
             "--out-file",
             f'{config.WORKING_DIRECTORY}/{random_id}_payment.addr',
-            *network_param
+            *get_network_param(),
         ],
         check=True,
-        env=env,
+        env=get_execution_environment(),
     )
     with open(f'{config.WORKING_DIRECTORY}/{random_id}_payment.addr') as f_in:
         wallet_data['payment_addr'] = f_in.read().strip()
@@ -137,17 +303,47 @@ def create_wallet():
 
 
     # CLEANUP
-    logger.debug(f"Start cleanup for ID {random_id}")
     cleanup_files = ['payment.vkey', 'payment.skey', 'payment.addr', 'stake.vkey', 'stake.skey']
-    for cleanup_file in cleanup_files:
-        try:
-            os.remove(f'{config.WORKING_DIRECTORY}/{random_id}_{cleanup_file}')
-        except FileNotFoundError:
-            logger.error(f'Failed to delete {config.WORKING_DIRECTORY}/{random_id}_{cleanup_file} : FileNotFound')
-    logger.debug(f"End cleanup for ID {random_id}")
+    cleanup(random_id, cleanup_files)
 
     return wallet_data
 
+def create_policy_keys():
+    # Main data structure to be filled using CLI commands
+    policy_keys = {
+       'policy_skey':{},
+       'policy_vkey':{}, 
+    }
+
+    # To avoid collisions a large random hexstring is prepended to filenames
+    random_id = create_random_id()
+
+    logger.debug(f"Start generating policy keys ID {random_id}")
+    completed = subprocess.run(
+        [
+            config.CLI_PATH,
+            "address",
+            "key-gen",
+            "--verification-key-file",
+            f'{config.WORKING_DIRECTORY}/{random_id}_policy.vkey',
+            "--signing-key-file",
+            f'{config.WORKING_DIRECTORY}/{random_id}_policy.skey',
+        ],
+        check=True,
+        env=get_execution_environment(),
+    )
+    with open(f'{config.WORKING_DIRECTORY}/{random_id}_policy.vkey') as f_in:
+        policy_keys['policy_vkey'] = json.load(f_in)
+    with open(f'{config.WORKING_DIRECTORY}/{random_id}_policy.skey') as f_in:
+        policy_keys['policy_skey'] = json.load(f_in)
+    logger.debug(f"End generating payment address for ID {random_id}")
+
+    # CLEANUP
+    cleanup_files = ['policy.skey', 'policy.vkey']
+    cleanup(random_id, cleanup_files)
+
+    return policy_keys
+    
 
 def mint(tx_ins, assets, wallet, excess_addr=""):
     """
@@ -199,6 +395,16 @@ def mint(tx_ins, assets, wallet, excess_addr=""):
     #   5. Submit the Transaction
     #   5.1 Call submit using the CLI
     #   5.2 Validate the output
+
+    # To avoid collisions a large random hexstring is prepended to filenames
+    random_id = create_random_id()
+
+    # TODO This will be the main point to work on tomorrow.
+
+    # CLEANUP
+    cleanup_files = []
+    cleanup(random_id, cleanup_files)
+    
     pass
 
 
@@ -210,6 +416,35 @@ def vend():
 ### UTILS ###
 #############
 
+def get_network_param():
+    network_param = []
+
+    # Depending on the configuration we'll either need to provide:
+    # the "--mainnet" flag or
+    # the "--testnet-magic TESTNETMAGIC" parameter
+    if config.MAINNET:
+        network_param = ["--mainnet"]
+    else:
+        network_param  = ["--testnet-magic", str(config.TESTNET_MAGIC)]
+
+    return network_param
+
+def cleanup(random_id, cleanup_files):
+    logger.debug(f"Start cleanup for ID {random_id}")
+    for cleanup_file in cleanup_files:
+        try:
+            os.remove(f'{config.WORKING_DIRECTORY}/{random_id}_{cleanup_file}')
+        except FileNotFoundError:
+            logger.error(f'Failed to delete {config.WORKING_DIRECTORY}/{random_id}_{cleanup_file} : FileNotFound')
+    logger.debug(f"End cleanup for ID {random_id}")
+
+def create_random_id():
+    return hex(random.getrandbits(16**2))[2:]
+
+def get_execution_environment():
+    env = os.environ.copy()
+    env["CARDANO_NODE_SOCKET_PATH"] = config.NODE_IPC
+    return env
 
 def calculate_min_ada(assets):
     """
