@@ -5,6 +5,7 @@
 '''
 import random
 import os
+import itertools
 import json
 import math
 import logging
@@ -43,6 +44,8 @@ def main():
 
     wallet_data = create_wallet()
 
+    input(f"Send funds to this address: {wallet_data['payment_addr']}")
+
     utxos = query_wallet({'payment_addr':'addr_test1qzzr7yxw4skhe2p53fq4at50jmnmq27u9duwfry83ry4arz88xalyhy8ftlmgvvceyv3geglxp5vgwnlq76p9k4v9lfqvh4f4g'})
 
     print("UTXOS:", json.dumps(utxos, indent=4))
@@ -53,11 +56,13 @@ def main():
     policy_keys = create_policy_keys()
     print("Policy Keys:", json.dumps(policy_keys, indent=4))
 
-    policy_script = create_policy_script(policy_keys['policy_vkey'], before=12345678)
+    policy_script = create_policy_script(policy_keys['policy_vkey'], before=43380124)
     print("Policy script:", json.dumps(policy_script, indent=4))
 
     policy_id = calculate_policy_id(policy_script)
     print("Policy ID:", policy_id)
+
+    mint([{'policyId':policy_id, 'assetName':'TestCoin', 'amount':1, 'metadata':{'some_metadata':'value'}, 'addr':'addr_test1qqkjpcvjxwttvznw04psr3darq8nr7yme7xk22a432uey50x4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjasglwj3q'}], wallet_data, policy_script, policy_keys, excess_addr="addr_test1qqkjpcvjxwttvznw04psr3darq8nr7yme7xk22a432uey50x4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjasglwj3q")
 
 def setup():
     '''
@@ -73,6 +78,7 @@ def setup():
 #   - refactor into multiple files, this is getting out of hand.
 #   - start to persist data in a database
 #   - implement the setup function
+#   - Avoid pitfall: Refunding the vending system's own transaction
     
 def calculate_policy_id(policy_script):
     # The main data we'll return as output
@@ -344,8 +350,7 @@ def create_policy_keys():
 
     return policy_keys
     
-
-def mint(tx_ins, assets, wallet, excess_addr=""):
+def mint(assets, wallet, policy_script, policy_keys, tx_ins=[], excess_addr=""):
     """
     Mints a single transaction
 
@@ -353,11 +358,19 @@ def mint(tx_ins, assets, wallet, excess_addr=""):
 
     Parameters
     ----------
-    tx_in : list of strings
-        A list of transactions to be consumed for the minting transaction
     assets: list of dicts in the form {'policyId':'', 'assetName':'', 'amount':0, 'metadata':{}, 'addr':''} # << Maybe standardize this into a data class
-    wallet: Instance of a Wallet class
-    excess_addr: str
+    wallet: Instance of a Wallet class / datastructure
+        Transactions from this wallet will be consumed to mint and send the tokens
+    tx_in : list of strings (optional)
+        A list of transactions to be consumed for the minting transaction
+        For some NFTs it may be required to consume the incoming transactions.
+        In this case only the selected transactions will be consumed.
+        Otherwise any amount of transactions may be used.
+
+        Right now optimizing the reduction of transaction cost will not be focussed due to higher priority tasks.
+        This may result in undesirable consumption of transactions.
+        It could be possible that transactions are bundled which each contain one native token and its min-ADA value which could significantly increase the amount of data in the transaction.
+    excess_addr: str (optional)
         The address where all leftover assets should be sent to
 
     Returns
@@ -371,16 +384,6 @@ def mint(tx_ins, assets, wallet, excess_addr=""):
     #   4. Sign the transaction
     #   5. Submit the Transaction
 
-    # Detailled flow:
-    #   1. Create transaction with zero fees
-    #   1.1 Extract all assets contained in the tx_ins
-    #   1.2 Extract target wallets from assets
-    #   1.3 Calculate the minADA required for each recipient
-    #   1.4 Check if the policy has "invalid-before" or "invalid-hereafter"
-    #   1.5 If input and output assets are not the same, add minting information
-    #   1.6 The minting information must be readable from the database and made accessible to the cli via files
-    #   1.7 Write the transaction to a file
-    #
     #   2. Calculate the fee
     #   2.1 Call the appropriate cli function and read out the stdout
     #
@@ -399,13 +402,264 @@ def mint(tx_ins, assets, wallet, excess_addr=""):
     # To avoid collisions a large random hexstring is prepended to filenames
     random_id = create_random_id()
 
-    # TODO This will be the main point to work on tomorrow.
+
+    minting_input_transactions = []
+    # Get the wallet's TX_INs if tx_in is unspecified
+    if tx_ins:
+        minting_input_transactions = tx_ins
+    else:
+        minting_input_transactions = [tx for tx in query_wallet({'payment_addr':wallet['payment_addr']})]
+
+    # Calculate the TX_OUTs 
+    # 1. list all available resources (lovelaces and tokens)
+    available_resources = {}
+    utxos = query_wallet({'payment_addr':wallet['payment_addr']})
+    for tx in utxos:
+        if tx not in minting_input_transactions: continue
+        for asset in utxos[tx]['value']:
+            if asset == 'lovelace':
+                if not 'lovelace' in available_resources:
+                    available_resources['lovelace'] = 0
+                available_resources['lovelace'] += utxos[tx]['value']['lovelace']
+            else:
+                for token_name in utxos[tx]['value'][asset]:
+                    if not f'{asset}.{token_name}' in available_resources:
+                        available_resources[f'{asset}.{token_name}'] = 0
+                    available_resources[f'{asset}.{token_name}'] += utxos[tx]['value'][asset][token_name]
+
+    # 2. for all assets required, add the 'amount' to the available resources
+    #{'policyId':'', 'assetName':'', 'amount':0, 'metadata':{}, 'addr':''}
+    for asset in assets:
+        if not f'{asset["policyId"]}.{asset["assetName"]}' in available_resources:
+            available_resources[f'{asset["policyId"]}.{asset["assetName"]}'] = 0
+
+        available_resources[f'{asset["policyId"]}.{asset["assetName"]}'] += asset['amount']
+    # 3. list all the output addresses and assign the resources to be sent there
+    out_addresses = set(asset['addr'] for asset in assets)
+    tx_out = {}
+    for addr in out_addresses:
+        tx_out[addr] = {}
+        for asset in assets:
+            if asset['addr'] == addr:
+                if not f'{asset["policyId"]}.{asset["assetName"]}' in tx_out[addr]:
+                    tx_out[addr][f'{asset["policyId"]}.{asset["assetName"]}'] = 0
+                tx_out[addr][f'{asset["policyId"]}.{asset["assetName"]}'] += asset["amount"]
+                available_resources[f'{asset["policyId"]}.{asset["assetName"]}'] -= asset["amount"]
+
+    # 4. calculate the min ada for each address
+    for addr in tx_out:
+        addr_assets = []
+        for asset in tx_out[addr]:
+            addr_assets.append({'name':asset.split('.')[1], 'policyID':asset.split('.')[0]})
+        if not 'lovelace' in tx_out[addr]:
+            tx_out[addr]['lovelace'] = 0
+        min_ada = calculate_min_ada(addr_assets)
+        tx_out[addr]['lovelace'] += min_ada
+        available_resources['lovelace'] -= min_ada
+
+    empty_resources = []
+    for resource in available_resources:
+        if available_resources[resource] <= 0:
+            empty_resources.append(asset)
+
+    for resource in empty_resources:
+        del available_resources[resource]
+    
+
+    # 5. unless an excess addr is specified, all remaining tokens and lovelaces go back to the wallet
+    if not excess_addr:
+        excess_addr = wallet['payment_addr']
+
+    if not excess_addr in tx_out:
+        tx_out[excess_addr] = {}
+    for resource in available_resources:
+        if not resource in tx_out[excess_addr]:
+            tx_out[excess_addr][resource] = 0
+        tx_out[excess_addr][resource] += available_resources[resource]
+
+    tx_out_formatted = []
+    for addr in tx_out:
+        tx_out_formatted.append("--tx-out")
+        resourcestring = ''
+        for resource in tx_out[addr]:
+            if resource == 'lovelace':
+                resourcestring = f'{addr}+{tx_out[addr][resource]}'+resourcestring
+            else:
+                resourcestring = resourcestring+f'+{tx_out[addr][resource]} {resource}'
+        tx_out_formatted.append(resourcestring)
+
+    metadata = {'721':{'version': 1}}
+    for asset in assets:
+        if not asset['policyId'] in metadata:
+            metadata['721'][asset['policyId']] = {}
+        metadata['721'][asset['policyId']][asset['assetName']] = asset['metadata']
+    with open(f'{config.WORKING_DIRECTORY}/{random_id}_metadata.json', 'w') as f_out:
+        json.dump(metadata, f_out, indent=4)
+
+    with open(f'{config.WORKING_DIRECTORY}/{random_id}_policy.script', 'w') as f_out:
+        json.dump(policy_script, f_out, indent=4)
+    
+    process_parameters = [
+        config.CLI_PATH,
+        "transaction",
+        "build-raw",
+        "--fee",
+        "0", # Set fees to zero in order to calculate them in the next step
+        *list(itertools.chain.from_iterable(['--tx-in', tx_in] for tx_in in minting_input_transactions)),
+        *tx_out_formatted,
+        *list(itertools.chain.from_iterable([["--mint", f'{asset["amount"]} {asset["policyId"]}.{asset["assetName"]}'] for asset in assets])),
+        "--out-file",
+        f'{config.WORKING_DIRECTORY}/{random_id}_free_tx.raw'
+    ]
+    if len(assets):
+        process_parameters += ["--minting-script-file",
+        f"{config.WORKING_DIRECTORY}/{random_id}_policy.script",
+        "--metadata-json-file",
+        f"{config.WORKING_DIRECTORY}/{random_id}_metadata.json",]
+        for script in policy_script["scripts"]:
+            if script["type"] == "before":
+                process_parameters.append("--invalid-hereafter")
+                process_parameters.append(str(script["slot"]))
+            if script["type"] == "after":
+                process_parameters.append("--invalid-before")
+                process_parameters.append(str(script["slot"]))
+
+    completed = subprocess.run(
+        process_parameters,
+        #check=True,
+        env=get_execution_environment(),
+        capture_output=True,
+    )
+
+    print(*process_parameters)
+    print(completed.stdout.decode())
+    print(completed.stderr.decode())
+
+    tx_fee = calculate_fee(tx_out_count=len(tx_out), tx_in_count=len(minting_input_transactions), random_id=random_id)
+
+
+    tx_out[excess_addr]['lovelace'] -= tx_fee
+    
+    tx_out_formatted = []
+    for addr in tx_out:
+        tx_out_formatted.append("--tx-out")
+        resourcestring = ''
+        for resource in tx_out[addr]:
+            if resource == 'lovelace':
+                resourcestring = f'{addr}+{tx_out[addr][resource]}'+resourcestring
+            else:
+                resourcestring = resourcestring+f'+{tx_out[addr][resource]} {resource}'
+        tx_out_formatted.append(resourcestring)
+
+    process_parameters = [
+        config.CLI_PATH,
+        "transaction",
+        "build-raw",
+        "--fee",
+        str(tx_fee), # Set fees to zero in order to calculate them in the next step
+        *list(itertools.chain.from_iterable(['--tx-in', tx_in] for tx_in in minting_input_transactions)),
+        *tx_out_formatted,
+        *list(itertools.chain.from_iterable([["--mint", f'{asset["amount"]} {asset["policyId"]}.{asset["assetName"]}'] for asset in assets])),
+        "--out-file",
+        f'{config.WORKING_DIRECTORY}/{random_id}_tx.raw'
+    ]
+    if len(assets):
+        process_parameters += ["--minting-script-file",
+        f"{config.WORKING_DIRECTORY}/{random_id}_policy.script",
+        "--metadata-json-file",
+        f"{config.WORKING_DIRECTORY}/{random_id}_metadata.json",]
+        for script in policy_script["scripts"]:
+            if script["type"] == "before":
+                process_parameters.append("--invalid-hereafter")
+                process_parameters.append(str(script["slot"]))
+            if script["type"] == "after":
+                process_parameters.append("--invalid-before")
+                process_parameters.append(str(script["slot"]))
+
+    completed = subprocess.run(
+        process_parameters,
+        check=True,
+        env=get_execution_environment(),
+        capture_output=True,
+    )
+
+    with open(f'{config.WORKING_DIRECTORY}/{random_id}_payment.skey', 'w') as f_out:
+        json.dump(wallet['payment_skey'], f_out, indent=4)
+
+    with open(f'{config.WORKING_DIRECTORY}/{random_id}_policy.skey', 'w') as f_out:
+        json.dump(policy_keys['policy_skey'], f_out, indent=4)
+
+    completed = subprocess.run(
+        [
+            config.CLI_PATH,
+            "transaction",
+            "sign",
+            "--signing-key-file",
+            f'{config.WORKING_DIRECTORY}/{random_id}_payment.skey',
+            "--signing-key-file",
+            f'{config.WORKING_DIRECTORY}/{random_id}_policy.skey',
+            *get_network_param(),
+            '--tx-body-file',
+            f'{config.WORKING_DIRECTORY}/{random_id}_tx.raw',
+            '--out-file',
+            f'{config.WORKING_DIRECTORY}/{random_id}_signed_tx.raw',
+            
+        ],
+        check=True,
+        env=get_execution_environment(),
+    )
+
+
+    completed = subprocess.run(
+        [
+            config.CLI_PATH,
+            "transaction",
+            "submit",
+            "--tx-file",
+            f'{config.WORKING_DIRECTORY}/{random_id}_signed_tx.raw',
+            *get_network_param(),
+        ],
+        check=True,
+        env=get_execution_environment(),
+    )
 
     # CLEANUP
-    cleanup_files = []
-    cleanup(random_id, cleanup_files)
+    cleanup_files = ['free_tx.raw', 'tx.raw', 'signed_tx.raw', 'metadata.json', 'policy.script', 'payment.skey', 'policy.skey']
+    #cleanup(random_id, cleanup_files)
     
     pass
+
+def calculate_fee(tx_out_count, tx_in_count, random_id):
+    protocol = get_network_protocol()
+    with open(f'{config.WORKING_DIRECTORY}/{random_id}_protocol.json', 'w') as f_out:
+        json.dump(protocol, f_out, indent=4)
+
+    completed = subprocess.run(
+        [
+            config.CLI_PATH,
+            "transaction",
+            "calculate-min-fee",
+            "--tx-body-file",
+            f'{config.WORKING_DIRECTORY}/{random_id}_free_tx.raw',
+            "--tx-in-count",
+            str(tx_in_count),
+            "--tx-out-count",
+            str(tx_out_count),
+            "--witness-count",
+            "1", # for now no multisig
+            *get_network_param(),
+            "--protocol-params-file",
+            f'{config.WORKING_DIRECTORY}/{random_id}_protocol.json',
+        ],
+        check=True,
+        env=get_execution_environment(),
+        capture_output=True,
+    )
+
+    cleanup_files = ['protocol.json']
+    cleanup(random_id, cleanup_files)
+
+    return int(completed.stdout.decode().split()[0])
 
 
 def vend():
