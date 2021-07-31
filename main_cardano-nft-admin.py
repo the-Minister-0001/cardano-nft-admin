@@ -12,7 +12,20 @@ import logging
 import sqlite3
 import subprocess
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import relationship
+from sqlalchemy.orm import declarative_base
+
 import config
+from models.NFT import NFT
+from models.Policy import Policy
+from models.Project import Project
+from models.RelSaleSizeProject import RelSaleSizeProject
+from models.Reserve import Reserve
+from models.SaleSize import SaleSize
+from models.Wallet import Wallet
+from models.base import Base
 
 """
 Possible actions from the CLI:
@@ -40,9 +53,9 @@ logger = logging.getLogger(__name__)
 def main():
     setup()
 
-    wallet_data = create_wallet()
+    wallet = create_wallet()
 
-    input(f"Send funds to this address: {wallet_data['payment_addr']}")
+    input(f"Send funds to this address: {wallet.payment_addr}")
 
     utxos = query_wallet(
         {
@@ -74,7 +87,7 @@ def main():
                 "addr": "addr_test1qqkjpcvjxwttvznw04psr3darq8nr7yme7xk22a432uey50x4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjasglwj3q",
             }
         ],
-        wallet_data,
+        wallet,
         policy_script,
         policy_keys,
         excess_addr="addr_test1qqkjpcvjxwttvznw04psr3darq8nr7yme7xk22a432uey50x4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjasglwj3q",
@@ -257,13 +270,7 @@ def create_policy_script(policy_vkey, before=-1, after=-1):
 
 def create_wallet():
     # Main data structure to be filled using CLI commands
-    wallet_data = {
-        "staking_skey": {},
-        "staking_vkey": {},
-        "payment_skey": {},
-        "payment_vkey": {},
-        "payment_addr": "",
-    }
+    wallet = Wallet()
 
     # To avoid collisions a large random hexstring is prepended to filenames
     random_id = create_random_id()
@@ -284,9 +291,9 @@ def create_wallet():
         env=get_execution_environment(),
     )
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_stake.vkey") as f_in:
-        wallet_data["staking_vkey"] = json.load(f_in)
+        wallet.staking_vkey = json.load(f_in)
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_stake.skey") as f_in:
-        wallet_data["staking_skey"] = json.load(f_in)
+        wallet.staking_skey = json.load(f_in)
     logger.debug(f"End generating staking keys for ID {random_id}")
 
     # Generate payment keys
@@ -305,9 +312,9 @@ def create_wallet():
         env=get_execution_environment(),
     )
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_payment.vkey") as f_in:
-        wallet_data["payment_vkey"] = json.load(f_in)
+        wallet.payment_vkey = json.load(f_in)
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_payment.skey") as f_in:
-        wallet_data["payment_skey"] = json.load(f_in)
+        wallet.payment_skey = json.load(f_in)
     logger.debug(f"End generating payment keys for ID {random_id}")
 
     # Generate payment address
@@ -329,7 +336,7 @@ def create_wallet():
         env=get_execution_environment(),
     )
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_payment.addr") as f_in:
-        wallet_data["payment_addr"] = f_in.read().strip()
+        wallet.payment_addr = f_in.read().strip()
     logger.debug(f"End generating payment address for ID {random_id}")
 
     # CLEANUP
@@ -342,7 +349,7 @@ def create_wallet():
     ]
     cleanup(random_id, cleanup_files)
 
-    return wallet_data
+    return wallet
 
 
 def create_policy_keys():
@@ -440,13 +447,13 @@ def mint(assets, wallet, policy_script, policy_keys, tx_ins=[], excess_addr=""):
         minting_input_transactions = tx_ins
     else:
         minting_input_transactions = [
-            tx for tx in query_wallet({"payment_addr": wallet["payment_addr"]})
+            tx for tx in query_wallet({"payment_addr": wallet.payment_addr})
         ]
 
     # Calculate the TX_OUTs
     # 1. list all available resources (lovelaces and tokens)
     available_resources = {}
-    utxos = query_wallet({"payment_addr": wallet["payment_addr"]})
+    utxos = query_wallet({"payment_addr": wallet.payment_addr})
     for tx in utxos:
         if tx not in minting_input_transactions:
             continue
@@ -511,7 +518,7 @@ def mint(assets, wallet, policy_script, policy_keys, tx_ins=[], excess_addr=""):
 
     # 5. unless an excess addr is specified, all remaining tokens and lovelaces go back to the wallet
     if not excess_addr:
-        excess_addr = wallet["payment_addr"]
+        excess_addr = wallet.payment_addr
 
     if not excess_addr in tx_out:
         tx_out[excess_addr] = {}
@@ -662,7 +669,7 @@ def mint(assets, wallet, policy_script, policy_keys, tx_ins=[], excess_addr=""):
     )
 
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_payment.skey", "w") as f_out:
-        json.dump(wallet["payment_skey"], f_out, indent=4)
+        json.dump(wallet.payment_skey, f_out, indent=4)
 
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_policy.skey", "w") as f_out:
         json.dump(policy_keys["policy_skey"], f_out, indent=4)
