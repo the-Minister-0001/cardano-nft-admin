@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""
-    I have not yet found a way to run a node via docker and have the node.socket available to anything other than root.
-    For this reason this script still requires root privileges.
-"""
-import random
+
+# TODO:
+#   - Separate Policy into Keys, Policy and Keys X Policy with the policy ID
+#   - Add documentation
+#   - refactor into multiple files, this is getting out of hand.
+#   - start to persist data in a database
+#   - implement the setup function
+#   - Avoid pitfall: Refunding the vending system's own transaction
+#   - requirements.txt
+
 import os
 import itertools
 import json
@@ -18,6 +23,7 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.orm import declarative_base
 
 import config
+import utils
 from models.NFT import NFT
 from models.Policy import Policy
 from models.Project import Project
@@ -38,9 +44,9 @@ Possible actions from the CLI:
         - Support both a single wallet (mvp) and one wallet per purchase
         - Handle reservations
     - Mint once
-    - Refresh metadata
+    - Refresh metadata (re-mint)
+    - Burn
     - istanciate wallet instance as files
-
 """
 
 logging.basicConfig(
@@ -57,30 +63,23 @@ def main():
 
     input(f"Send funds to this address: {wallet.payment_addr}")
 
-    utxos = query_wallet(
-        {
-            "payment_addr": "addr_test1qzzr7yxw4skhe2p53fq4at50jmnmq27u9duwfry83ry4arz88xalyhy8ftlmgvvceyv3geglxp5vgwnlq76p9k4v9lfqvh4f4g"
-        }
-    )
-
-    print("UTXOS:", json.dumps(utxos, indent=4))
 
     protocol = get_network_protocol()
     print("Protocol:", json.dumps(protocol, indent=4))
 
-    policy_keys = create_policy_keys()
-    print("Policy Keys:", json.dumps(policy_keys, indent=4))
+    policy = create_policy_keys()
+    print("Policy Keys:", policy)
 
-    policy_script = create_policy_script(policy_keys["policy_vkey"], before=43380124)
-    print("Policy script:", json.dumps(policy_script, indent=4))
+    policy = create_policy_script(policy, before=43380124)
+    print("Policy script:", policy)
 
-    policy_id = calculate_policy_id(policy_script)
-    print("Policy ID:", policy_id)
+    policy.policy_id = calculate_policy_id(policy)
+    print("Policy ID:", policy.policy_id)
 
     mint(
         [
             {
-                "policyId": policy_id,
+                "policyId": policy.policy_id,
                 "assetName": "TestCoin",
                 "amount": 1,
                 "metadata": {"some_metadata": "value"},
@@ -88,44 +87,25 @@ def main():
             }
         ],
         wallet,
-        policy_script,
-        policy_keys,
+        policy,
         excess_addr="addr_test1qqkjpcvjxwttvznw04psr3darq8nr7yme7xk22a432uey50x4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjasglwj3q",
     )
 
 
 def setup():
-    """
-        Ensure that the working directory is created and usable
-        Ensure that the database connection is working
-        Ensure that the database schema is correct
-    """
     # Create the working directory if it does not exist
     if not os.path.exists(config.WORKING_DIRECTORY):
         os.makedirs(config.WORKING_DIRECTORY)
 
-    if not os.path.exists(config.SQLITE_PATH):
-        database_valid = False
-
-
-# TODO:
-#   - implement minting, make sure all params are required
-#   - Add documentation
-#   - refactor into multiple files, this is getting out of hand.
-#   - start to persist data in a database
-#   - implement the setup function
-#   - Avoid pitfall: Refunding the vending system's own transaction
-
-
-def calculate_policy_id(policy_script):
+def calculate_policy_id(policy):
     # The main data we'll return as output
     policy_id = ""
 
     # To avoid collisions a large random hexstring is prepended to filenames
-    random_id = create_random_id()
+    random_id = utils.create_random_id()
 
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_policy.script", "w") as f_out:
-        json.dump(policy_script, f_out, indent=4)
+        print(policy.policy_script, file=f_out)
 
     completed = subprocess.run(
         [
@@ -150,13 +130,10 @@ def calculate_policy_id(policy_script):
 
 
 def get_network_protocol():
-    # The main data we'll return as output
     protocol = {}
 
-    # To avoid collisions a large random hexstring is prepended to filenames
-    random_id = create_random_id()
+    random_id = utils.create_random_id()
 
-    # TODO: The above code is copied to multiple methods, there may be a better way.
     completed = subprocess.run(
         [
             config.CLI_PATH,
@@ -181,13 +158,10 @@ def get_network_protocol():
 
 
 def query_wallet(wallet):
-    # The main data we'll return as output
     utxos = {}
 
-    # To avoid collisions a large random hexstring is prepended to filenames
-    random_id = create_random_id()
+    random_id = utils.create_random_id()
 
-    # TODO: The above code is copied to multiple methods, there may be a better way.
     try:
         completed = subprocess.run(
             [
@@ -221,7 +195,9 @@ def query_wallet(wallet):
     return utxos
 
 
-def create_policy_script(policy_vkey, before=-1, after=-1):
+def create_policy_script(old_policy, before=-1, after=-1):
+    policy = Policy(id=old_policy.id, policy_vkey=old_policy.policy_vkey, policy_skey=old_policy.policy_skey)
+
     # Main data structure to be filled using CLI commands
     policy_script = {
         "type": "all",
@@ -229,18 +205,21 @@ def create_policy_script(policy_vkey, before=-1, after=-1):
     }
 
     # To avoid collisions a large random hexstring is prepended to filenames
-    random_id = create_random_id()
+    random_id = utils.create_random_id()
 
     if not before < 0:
         policy_script["scripts"].append({"slot": before, "type": "before"})
+        policy.before = before
 
     if not after < 0:
         policy_script["scripts"].append({"slot": before, "type": "after"})
+        policy.after = after
 
     keyHash = ""
 
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_policy.vkey", "w") as f_out:
-        json.dump(policy_vkey, f_out, indent=4)
+        print(policy.policy_vkey, file=f_out)
+
 
     subprocess.run(
         [
@@ -261,11 +240,13 @@ def create_policy_script(policy_vkey, before=-1, after=-1):
 
     policy_script["scripts"].append({"keyHash": keyHash, "type": "sig"})
 
+    policy.policy_script = json.dumps(policy_script, indent=4)
+
     # CLEANUP
     cleanup_files = ["policy.vkey", "policy.hash"]
     cleanup(random_id, cleanup_files)
 
-    return policy_script
+    return policy
 
 
 def create_wallet():
@@ -273,7 +254,7 @@ def create_wallet():
     wallet = Wallet()
 
     # To avoid collisions a large random hexstring is prepended to filenames
-    random_id = create_random_id()
+    random_id = utils.create_random_id()
 
     # Create Staking Keys
     logger.debug(f"Start generating staking keys for ID {random_id}")
@@ -354,13 +335,10 @@ def create_wallet():
 
 def create_policy_keys():
     # Main data structure to be filled using CLI commands
-    policy_keys = {
-        "policy_skey": {},
-        "policy_vkey": {},
-    }
+    policy = Policy()
 
     # To avoid collisions a large random hexstring is prepended to filenames
-    random_id = create_random_id()
+    random_id = utils.create_random_id()
 
     logger.debug(f"Start generating policy keys ID {random_id}")
     completed = subprocess.run(
@@ -377,19 +355,19 @@ def create_policy_keys():
         env=get_execution_environment(),
     )
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_policy.vkey") as f_in:
-        policy_keys["policy_vkey"] = json.load(f_in)
+        policy.policy_vkey = f_in.read()
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_policy.skey") as f_in:
-        policy_keys["policy_skey"] = json.load(f_in)
+        policy.policy_skey = f_in.read()
     logger.debug(f"End generating payment address for ID {random_id}")
 
     # CLEANUP
     cleanup_files = ["policy.skey", "policy.vkey"]
     cleanup(random_id, cleanup_files)
 
-    return policy_keys
+    return policy
 
 
-def mint(assets, wallet, policy_script, policy_keys, tx_ins=[], excess_addr=""):
+def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
     """
     Mints a single transaction
 
@@ -439,7 +417,7 @@ def mint(assets, wallet, policy_script, policy_keys, tx_ins=[], excess_addr=""):
     #   5.2 Validate the output
 
     # To avoid collisions a large random hexstring is prepended to filenames
-    random_id = create_random_id()
+    random_id = utils.create_random_id()
 
     minting_input_transactions = []
     # Get the wallet's TX_INs if tx_in is unspecified
@@ -549,7 +527,7 @@ def mint(assets, wallet, policy_script, policy_keys, tx_ins=[], excess_addr=""):
         json.dump(metadata, f_out, indent=4)
 
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_policy.script", "w") as f_out:
-        json.dump(policy_script, f_out, indent=4)
+        print(policy.policy_script, file=f_out)
 
     process_parameters = [
         config.CLI_PATH,
@@ -584,7 +562,7 @@ def mint(assets, wallet, policy_script, policy_keys, tx_ins=[], excess_addr=""):
             "--metadata-json-file",
             f"{config.WORKING_DIRECTORY}/{random_id}_metadata.json",
         ]
-        for script in policy_script["scripts"]:
+        for script in json.loads(policy.policy_script)["scripts"]:
             if script["type"] == "before":
                 process_parameters.append("--invalid-hereafter")
                 process_parameters.append(str(script["slot"]))
@@ -653,7 +631,7 @@ def mint(assets, wallet, policy_script, policy_keys, tx_ins=[], excess_addr=""):
             "--metadata-json-file",
             f"{config.WORKING_DIRECTORY}/{random_id}_metadata.json",
         ]
-        for script in policy_script["scripts"]:
+        for script in json.loads(policy.policy_script)["scripts"]:
             if script["type"] == "before":
                 process_parameters.append("--invalid-hereafter")
                 process_parameters.append(str(script["slot"]))
@@ -672,7 +650,7 @@ def mint(assets, wallet, policy_script, policy_keys, tx_ins=[], excess_addr=""):
         json.dump(wallet.payment_skey, f_out, indent=4)
 
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_policy.skey", "w") as f_out:
-        json.dump(policy_keys["policy_skey"], f_out, indent=4)
+        print(policy.policy_skey, file=f_out)
 
     completed = subprocess.run(
         [
@@ -788,11 +766,6 @@ def cleanup(random_id, cleanup_files):
             )
     logger.debug(f"End cleanup for ID {random_id}")
 
-
-def create_random_id():
-    return hex(random.getrandbits(16 ** 2))[2:]
-
-
 def get_execution_environment():
     env = os.environ.copy()
     env["CARDANO_NODE_SOCKET_PATH"] = config.NODE_IPC
@@ -800,6 +773,7 @@ def get_execution_environment():
 
 
 def calculate_min_ada(assets):
+    # TODO Accept a list of NFT classes
     """
     Calculates the minADA for 
     assets = [
