@@ -15,4 +15,4 @@ class Policy(Base):
     after = Column(Integer)
 
     def __repr__(Base):
-        return f"<Policy(id={id})>"
+        return f"<Policy(id={self.id})>"
