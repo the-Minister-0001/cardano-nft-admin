@@ -10,6 +10,7 @@ class Project(Base):
     id = Column(Integer, primary_key=True)
     policy_id = Column(Integer, ForeignKey('policies.id'))
     wallet_id = Column(Integer, ForeignKey('wallets.id'))
+    project_name = Column(String)
     dynamic = Column(Boolean)
     lock_sales = Column(Boolean)
-    price = Column(Integer)
+    price = Column(Integer) # In lovelace

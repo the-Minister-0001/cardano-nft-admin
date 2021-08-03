@@ -58,32 +58,49 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    setup()
+    engine = create_engine(config.DB_CONNECTION_STRING, echo=False)
+    setup(engine)
 
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    print("Creating wallet")
     wallet = create_wallet()
-    print("wallet skey", wallet.payment_skey)
-    print("wallet vkey", wallet.payment_vkey)
 
-    print(f"Send funds to this address: \n{wallet.payment_addr}")
-    import time
-    while not query_wallet(wallet):
-        time.sleep(1)
-        print('.', end='', flush=True)
-    print()
-
-    protocol = get_network_protocol()
-    print("Protocol:", json.dumps(protocol, indent=4))
-
+    print("Creating policy keys")
     policy = create_policy_keys()
-    print("Policy Keys:", policy)
-    print('skey', policy.policy_skey)
-    print('vkey', policy.policy_vkey, flush=True)
 
+    print("Creating policy")
     policy = create_policy_script(policy, before=38848203) # mainnet, end of august '21
-    print("Policy script:", policy)
-
     policy.policy_id = calculate_policy_id(policy)
     print("Policy ID:", policy.policy_id)
+
+    for salesize in [1, 3, 10]:
+        if not session.query(SaleSize).filter(SaleSize.amount == salesize).count():
+            session.add(SaleSize(amount=salesize))
+
+    session.add(wallet)
+    session.add(policy)
+    session.commit()
+    # The above code tests if the creation of the files still works
+
+    wallet = session.query(Wallet).filter(Wallet.id == 1).first()
+    policy = session.query(Policy).filter(Policy.id == 1).first()
+
+    if not session.query(Project).filter(Project.project_name.like("%My Project%")).count():
+        project = Project(policy_id=policy.id, wallet_id=wallet.id, project_name="This is My Project Number One", dynamic=False, lock_sales=False, price=88000000)
+    else:
+        project = session.query(Project).filter(Project.project_name.like("%My Project%")).first()
+
+    for salesize in [1, 3, 10]:
+        salesize = session.query(SaleSize).filter(SaleSize.amount == salesize).first()
+        if not session.query(RelSaleSizeProject).filter(RelSaleSizeProject.project_id == project.id).filter(RelSaleSizeProject.salesize_id == salesize.id).count():
+            project_salesize = RelSaleSizeProject(project_id=project.id, salesize_id=salesize.id)
+            session.add(project_salesize)
+    session.commit()
+
+    session.add(project)
+    session.commit()
 
 
     assets = []
@@ -101,6 +118,14 @@ def main():
             'addr':'addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0',
         })
 
+
+    print(f"Send funds to this address: \n{wallet.payment_addr}")
+    import time
+    while not query_wallet(wallet):
+        time.sleep(1)
+        print('.', end='', flush=True)
+    print()
+
     try:
         re_mint(
             assets,
@@ -117,6 +142,9 @@ def main():
         )
 
 def re_mint(assets, wallet, policy, excess_addr=""):
+    if not excess_addr:
+        excess_addr = wallet.payment_addr
+
     redirected_assets = []
     for asset in assets:
         copied_asset = asset.copy()
@@ -153,10 +181,11 @@ def re_mint(assets, wallet, policy, excess_addr=""):
 
     mint(burn_assets, wallet, policy, excess_addr=excess_addr)
 
-def setup():
+def setup(engine):
     # Create the working directory if it does not exist
     if not os.path.exists(config.WORKING_DIRECTORY):
         os.makedirs(config.WORKING_DIRECTORY)
+    Base.metadata.create_all(engine)
 
 def calculate_policy_id(policy):
     # The main data we'll return as output
@@ -270,11 +299,11 @@ def create_policy_script(old_policy, before=-1, after=-1):
 
     if not before < 0:
         policy_script["scripts"].append({"slot": before, "type": "before"})
-        policy.before = before
+        policy.before = int(before)
 
     if not after < 0:
         policy_script["scripts"].append({"slot": before, "type": "after"})
-        policy.after = after
+        policy.after = int(after)
 
     keyHash = ""
 
@@ -333,9 +362,9 @@ def create_wallet():
         env=get_execution_environment(),
     )
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_stake.vkey") as f_in:
-        wallet.staking_vkey = json.load(f_in)
+        wallet.staking_vkey = f_in.read()
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_stake.skey") as f_in:
-        wallet.staking_skey = json.load(f_in)
+        wallet.staking_skey = f_in.read()
     logger.debug(f"End generating staking keys for ID {random_id}")
 
     # Generate payment keys
@@ -354,9 +383,9 @@ def create_wallet():
         env=get_execution_environment(),
     )
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_payment.vkey") as f_in:
-        wallet.payment_vkey = json.load(f_in)
+        wallet.payment_vkey = f_in.read()
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_payment.skey") as f_in:
-        wallet.payment_skey = json.load(f_in)
+        wallet.payment_skey = f_in.read()
     logger.debug(f"End generating payment keys for ID {random_id}")
 
     # Generate payment address
@@ -700,7 +729,7 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
     )
 
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_payment.skey", "w") as f_out:
-        json.dump(wallet.payment_skey, f_out, indent=4)
+        print(wallet.payment_skey, file=f_out)
 
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_policy.skey", "w") as f_out:
         print(policy.policy_skey, file=f_out)
