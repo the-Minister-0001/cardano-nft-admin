@@ -62,7 +62,11 @@ def main():
     wallet = create_wallet()
 
     input(f"Send funds to this address: {wallet.payment_addr}")
-
+    import time
+    while not query_wallet(wallet):
+        time.sleep(1)
+        print('.', end='', flush=True)
+    print()
 
     protocol = get_network_protocol()
     print("Protocol:", json.dumps(protocol, indent=4))
@@ -76,19 +80,77 @@ def main():
     policy.policy_id = calculate_policy_id(policy)
     print("Policy ID:", policy.policy_id)
 
+    assets = []
+    for k in range(3):
+        metadata = {
+            'awarded to:':'awardee',
+            'occasion':'olympics',
+        }
+        assets.append({
+            "policyId": policy.policy_id,
+            "assetName": f'OlympicTorch{k+1:02d}',
+            'amount':1,
+            'metadata': metadata,
+            'addr':'addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0',
+        })
+
     mint(
-        [
-            {
-                "policyId": policy.policy_id,
-                "assetName": "TestCoin",
-                "amount": 1,
-                "metadata": {"some_metadata": "value"},
-                "addr": "addr_test1qqkjpcvjxwttvznw04psr3darq8nr7yme7xk22a432uey50x4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjasglwj3q",
-            }
-        ],
+        assets,
+#        [
+#            {
+#                "policyId": policy.policy_id,
+#                "assetName": "TestCoin",
+#                "amount": 1,
+#                "metadata": {"some_metadata": "value"},
+#                "addr": "addr_test1qqkjpcvjxwttvznw04psr3darq8nr7yme7xk22a432uey50x4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjasglwj3q",
+#            }
+#        ],
         wallet,
         policy,
-        excess_addr="addr_test1qqkjpcvjxwttvznw04psr3darq8nr7yme7xk22a432uey50x4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjasglwj3q",
+        excess_addr="addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0",
+    )
+
+    import time
+    input(f"Send funds to this address: {wallet.payment_addr}")
+    while not query_wallet(wallet):
+        time.sleep(1)
+        print('.', end='', flush=True)
+    print()
+
+    assets = []
+    for k in range(3):
+        metadata = {
+            'awarded to:':'awardee',
+            'occasion':'olympics',
+        }
+        assets.append({
+            "policyId": policy.policy_id,
+            "assetName": f'OlympicTorch{k+1:02d}',
+            'amount':-1,
+            'metadata': metadata,
+            'addr':'addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0',
+        })
+        assets.append({
+            "policyId": policy.policy_id,
+            "assetName": f'OlympicTorch{k+5:02d}',
+            'amount':1,
+            'metadata': metadata,
+            'addr':'addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0',
+        })
+    mint(
+        assets,
+#        [
+#            {
+#                "policyId": policy.policy_id,
+#                "assetName": "TestCoin",
+#                "amount": 1,
+#                "metadata": {"some_metadata": "value"},
+#                "addr": "addr_test1qqkjpcvjxwttvznw04psr3darq8nr7yme7xk22a432uey50x4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjasglwj3q",
+#            }
+#        ],
+        wallet,
+        policy,
+        excess_addr="addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0",
     )
 
 
@@ -169,7 +231,7 @@ def query_wallet(wallet):
                 "query",
                 "utxo",
                 "--address",
-                wallet["payment_addr"],
+                wallet.payment_addr,
                 "--out-file",
                 f"{config.WORKING_DIRECTORY}/{random_id}_utxos.json",
                 *get_network_param(),
@@ -425,13 +487,13 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
         minting_input_transactions = tx_ins
     else:
         minting_input_transactions = [
-            tx for tx in query_wallet({"payment_addr": wallet.payment_addr})
+            tx for tx in query_wallet(wallet)
         ]
 
     # Calculate the TX_OUTs
     # 1. list all available resources (lovelaces and tokens)
     available_resources = {}
-    utxos = query_wallet({"payment_addr": wallet.payment_addr})
+    utxos = query_wallet(wallet)
     for tx in utxos:
         if tx not in minting_input_transactions:
             continue
@@ -486,10 +548,11 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
         tx_out[addr]["lovelace"] += min_ada
         available_resources["lovelace"] -= min_ada
 
+
     empty_resources = []
     for resource in available_resources:
         if available_resources[resource] <= 0:
-            empty_resources.append(asset)
+            empty_resources.append(resource)
 
     for resource in empty_resources:
         del available_resources[resource]
@@ -513,9 +576,10 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
             if resource == "lovelace":
                 resourcestring = f"{addr}+{tx_out[addr][resource]}" + resourcestring
             else:
-                resourcestring = (
-                    resourcestring + f"+{tx_out[addr][resource]} {resource}"
-                )
+                if tx_out[addr][resource] > 0:
+                    resourcestring = (
+                        resourcestring + f"+{tx_out[addr][resource]} {resource}"
+                    )
         tx_out_formatted.append(resourcestring)
 
     metadata = {"721": {"version": 1}}
@@ -529,6 +593,13 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_policy.script", "w") as f_out:
         print(policy.policy_script, file=f_out)
 
+    minting_string = ''
+    for asset in assets:
+        if not minting_string:
+            minting_string = f'{asset["amount"]} {asset["policyId"]}.{asset["assetName"]}'
+        else:
+            minting_string += f'+{asset["amount"]:d} {asset["policyId"]}.{asset["assetName"]}'
+        
     process_parameters = [
         config.CLI_PATH,
         "transaction",
@@ -541,17 +612,8 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
             )
         ),
         *tx_out_formatted,
-        *list(
-            itertools.chain.from_iterable(
-                [
-                    [
-                        "--mint",
-                        f'{asset["amount"]} {asset["policyId"]}.{asset["assetName"]}',
-                    ]
-                    for asset in assets
-                ]
-            )
-        ),
+        "--mint",
+        minting_string,
         "--out-file",
         f"{config.WORKING_DIRECTORY}/{random_id}_free_tx.raw",
     ]
@@ -593,9 +655,10 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
             if resource == "lovelace":
                 resourcestring = f"{addr}+{tx_out[addr][resource]}" + resourcestring
             else:
-                resourcestring = (
-                    resourcestring + f"+{tx_out[addr][resource]} {resource}"
-                )
+                if tx_out[addr][resource] > 0:
+                    resourcestring = (
+                        resourcestring + f"+{tx_out[addr][resource]} {resource}"
+                    )
         tx_out_formatted.append(resourcestring)
 
     process_parameters = [
@@ -610,17 +673,8 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
             )
         ),
         *tx_out_formatted,
-        *list(
-            itertools.chain.from_iterable(
-                [
-                    [
-                        "--mint",
-                        f'{asset["amount"]} {asset["policyId"]}.{asset["assetName"]}',
-                    ]
-                    for asset in assets
-                ]
-            )
-        ),
+        "--mint",
+        minting_string,
         "--out-file",
         f"{config.WORKING_DIRECTORY}/{random_id}_tx.raw",
     ]
