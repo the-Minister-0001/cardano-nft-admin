@@ -10,6 +10,7 @@
 #   - requirements.txt
 
 import os
+import time
 import itertools
 import json
 import math
@@ -60,8 +61,10 @@ def main():
     setup()
 
     wallet = create_wallet()
+    print("wallet skey", wallet.payment_skey)
+    print("wallet vkey", wallet.payment_vkey)
 
-    input(f"Send funds to this address: {wallet.payment_addr}")
+    print(f"Send funds to this address: \n{wallet.payment_addr}")
     import time
     while not query_wallet(wallet):
         time.sleep(1)
@@ -73,86 +76,82 @@ def main():
 
     policy = create_policy_keys()
     print("Policy Keys:", policy)
+    print('skey', policy.policy_skey)
+    print('vkey', policy.policy_vkey, flush=True)
 
-    policy = create_policy_script(policy, before=43380124)
+    policy = create_policy_script(policy, before=38848203) # mainnet, end of august '21
     print("Policy script:", policy)
 
     policy.policy_id = calculate_policy_id(policy)
     print("Policy ID:", policy.policy_id)
 
+
     assets = []
     for k in range(3):
         metadata = {
-            'awarded to:':'awardee',
-            'occasion':'olympics',
+            "name": "Some Token",
+            "ID": f"{k+1}/20",
         }
+
         assets.append({
             "policyId": policy.policy_id,
-            "assetName": f'OlympicTorch{k+1:02d}',
+            "assetName": f'sometoken{k+1:02d}',
             'amount':1,
             'metadata': metadata,
             'addr':'addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0',
         })
 
-    mint(
-        assets,
-#        [
-#            {
-#                "policyId": policy.policy_id,
-#                "assetName": "TestCoin",
-#                "amount": 1,
-#                "metadata": {"some_metadata": "value"},
-#                "addr": "addr_test1qqkjpcvjxwttvznw04psr3darq8nr7yme7xk22a432uey50x4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjasglwj3q",
-#            }
-#        ],
-        wallet,
-        policy,
-        excess_addr="addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0",
-    )
+    try:
+        re_mint(
+            assets,
+            wallet,
+            policy,
+            excess_addr="addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0",
+        )
+    except subprocess.CalledProcessError: # If the minting fails, send the ADA to the target wallet as a failsafe
+        mint(
+            [],
+            wallet,
+            policy,
+            excess_addr="addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0",
+        )
 
-    import time
-    input(f"Send funds to this address: {wallet.payment_addr}")
+def re_mint(assets, wallet, policy, excess_addr=""):
+    redirected_assets = []
+    for asset in assets:
+        copied_asset = asset.copy()
+        copied_asset['addr'] = wallet.payment_addr
+        redirected_assets.append(copied_asset)
+
+    print("Waiting for ADA input to mint")
     while not query_wallet(wallet):
-        time.sleep(1)
         print('.', end='', flush=True)
+        time.sleep(1)
     print()
+    print("Minting with new metadata!")
+    mint(redirected_assets, wallet, policy, excess_addr=wallet.payment_addr)
 
-    assets = []
-    for k in range(3):
-        metadata = {
-            'awarded to:':'awardee',
-            'occasion':'olympics',
-        }
-        assets.append({
-            "policyId": policy.policy_id,
-            "assetName": f'OlympicTorch{k+1:02d}',
-            'amount':-1,
-            'metadata': metadata,
-            'addr':'addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0',
-        })
-        assets.append({
-            "policyId": policy.policy_id,
-            "assetName": f'OlympicTorch{k+5:02d}',
-            'amount':1,
-            'metadata': metadata,
-            'addr':'addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0',
-        })
-    mint(
-        assets,
-#        [
-#            {
-#                "policyId": policy.policy_id,
-#                "assetName": "TestCoin",
-#                "amount": 1,
-#                "metadata": {"some_metadata": "value"},
-#                "addr": "addr_test1qqkjpcvjxwttvznw04psr3darq8nr7yme7xk22a432uey50x4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjasglwj3q",
-#            }
-#        ],
-        wallet,
-        policy,
-        excess_addr="addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0",
-    )
+    print("Waiting for transaction to go through...")
+    remint_tx_found = False
+    while not remint_tx_found:
+        print('.', end='', flush=True)
+        time.sleep(1)
+        utxos = query_wallet(wallet)
+        for tx in utxos:
+            if policy.policy_id in utxos[tx]["value"]:
+                if all(asset['assetName'] in utxos[tx]["value"][policy.policy_id] for asset in assets):
+                    remint_tx_found = True
+    print()
+    print("Burning minted tokens")
 
+    burn_assets = []
+    for asset in redirected_assets:
+        burn_asset = asset.copy()
+        burn_asset['amount'] = -1 * asset['amount']
+        burn_asset['addr'] = excess_addr
+        burn_assets.append(burn_asset)
+
+    mint(burn_assets, wallet, policy, excess_addr=excess_addr)
 
 def setup():
     # Create the working directory if it does not exist
@@ -584,7 +583,7 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
 
     metadata = {"721": {"version": 1}}
     for asset in assets:
-        if not asset["policyId"] in metadata:
+        if not asset["policyId"] in metadata["721"]:
             metadata["721"][asset["policyId"]] = {}
         metadata["721"][asset["policyId"]][asset["assetName"]] = asset["metadata"]
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_metadata.json", "w") as f_out:
@@ -612,13 +611,13 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
             )
         ),
         *tx_out_formatted,
-        "--mint",
-        minting_string,
         "--out-file",
         f"{config.WORKING_DIRECTORY}/{random_id}_free_tx.raw",
     ]
     if len(assets):
         process_parameters += [
+            "--mint",
+            minting_string,
             "--minting-script-file",
             f"{config.WORKING_DIRECTORY}/{random_id}_policy.script",
             "--metadata-json-file",
@@ -673,13 +672,13 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
             )
         ),
         *tx_out_formatted,
-        "--mint",
-        minting_string,
         "--out-file",
         f"{config.WORKING_DIRECTORY}/{random_id}_tx.raw",
     ]
     if len(assets):
         process_parameters += [
+            "--mint",
+            minting_string,
             "--minting-script-file",
             f"{config.WORKING_DIRECTORY}/{random_id}_policy.script",
             "--metadata-json-file",
