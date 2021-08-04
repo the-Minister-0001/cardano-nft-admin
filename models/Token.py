@@ -4,11 +4,12 @@ from sqlalchemy.orm import declarative_base
 
 from .base import Base
 
-class NFT(Base):
-    __tablename__ = 'nfts'
+class Token(Base):
+    __tablename__ = 'tokens'
 
     id = Column(Integer, primary_key=True)
     asset_name = Column(String)
-    minted = Column(Boolean)
-    nft_metadata = Column(String)
+    minted = Column(Integer)
+    max_mints = Column(Integer)
+    token_metadata = Column(String)
     project_id = Column(Integer, ForeignKey('projects.id'))

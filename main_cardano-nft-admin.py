@@ -8,6 +8,8 @@
 #   - implement the setup function
 #   - Avoid pitfall: Refunding the vending system's own transaction
 #   - requirements.txt
+#   - Refactor NFTs to "asset" which have a max amount and an amount of already minted tokens
+#           This will help to support FT projects, too
 
 import os
 import time
@@ -25,7 +27,7 @@ from sqlalchemy.orm import declarative_base
 
 import config
 import utils
-from models.NFT import NFT
+from models.Token import Token
 from models.Policy import Policy
 from models.Project import Project
 from models.RelSaleSizeProject import RelSaleSizeProject
@@ -105,18 +107,29 @@ def main():
 
     assets = []
     for k in range(3):
-        metadata = {
-            "name": "Some Token",
-            "ID": f"{k+1}/20",
-        }
+        asset_name = f'sometoken{k+1:02d}'
+        if not session.query(Token).filter(Token.project_id==project.id).filter(Token.asset_name==asset_name).count():
+            asset = Token()
+            asset.asset_name = asset_name
+            asset.minted = 0
+            asset.max_mints = 1
+            asset.token_metadata = json.dumps({
+                "name": "Some Token",
+                "ID": f"{k+1}/20",
+            })
+            asset.project_id = project.id # replaces policy ID, policy is attainable via project
+            session.add(asset)
+        else:
+            asset = session.query(Token).filter(Token.project_id==project.id).filter(Token.asset_name==asset_name).first()
 
-        assets.append({
-            "policyId": policy.policy_id,
-            "assetName": f'sometoken{k+1:02d}',
+
+        mintage = { # TODO this needs to be a data class but won't need to be written to the database
+            'asset':asset,
             'amount':1,
-            'metadata': metadata,
-            'addr':'addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0',
-        })
+            'addr':'addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0'
+        }
+        assets.append(mintage)
+    session.commit()
 
 
     print(f"Send funds to this address: \n{wallet.payment_addr}")
