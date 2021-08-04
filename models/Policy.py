@@ -13,6 +13,3 @@ class Policy(Base):
     policy_skey = Column(String)
     before = Column(Integer)
     after = Column(Integer)
-
-    def __repr__(Base):
-        return f"<Policy(id={self.id})>"

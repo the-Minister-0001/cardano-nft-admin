@@ -19,6 +19,7 @@ import math
 import logging
 import sqlite3
 import subprocess
+import random
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -27,6 +28,7 @@ from sqlalchemy.orm import declarative_base
 
 import config
 import utils
+from models.Mint import Mint
 from models.Token import Token
 from models.Policy import Policy
 from models.Project import Project
@@ -106,6 +108,7 @@ def main():
 
 
     assets = []
+    mint_idx = 0
     for k in range(3):
         asset_name = f'sometoken{k+1:02d}'
         if not session.query(Token).filter(Token.project_id==project.id).filter(Token.asset_name==asset_name).count():
@@ -118,19 +121,40 @@ def main():
                 "ID": f"{k+1}/20",
             })
             asset.project_id = project.id # replaces policy ID, policy is attainable via project
+            asset.sent_out = 0
+            asset.start_idx = mint_idx
+            asset.start_idx = mint_idx + asset.max_mints - 1
+            mint_idx += asset.max_mints
             session.add(asset)
         else:
             asset = session.query(Token).filter(Token.project_id==project.id).filter(Token.asset_name==asset_name).first()
-
-
-        mintage = { # TODO this needs to be a data class but won't need to be written to the database
-            'asset':asset,
-            'amount':1,
-            'addr':'addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0'
-        }
-        assets.append(mintage)
+        assets.append(asset)
     session.commit()
 
+    mintages = []
+    for asset in assets:
+        mintage = Mint()
+        mintage.token_id = asset.id
+        mintage.amount = 1
+        mintage.addr = 'addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0'
+        mintage.in_progress = False
+        mintage.completed = False
+        session.add(mintage)
+        mintages.append(mintage)
+    session.commit()
+
+
+    free_tokens = session.query(Token).filter(Token.project_id==project.id).filter(Token.sent_out < Token.max_mints).filter(Token.id.not_in(session.query(Reserve).with_entities(Reserve.token_id).filter(Reserve.project_id == project.id))).all()
+
+    reserve = Reserve()
+    reserve.project_id = project.id
+    reserve.dust = random.randint(2000000, 4000000) # TODO make sure that's not an already occupied value
+    reserve.token_id = random.choice(free_tokens).id
+    session.add(reserve)
+    session.commit()
+
+    free_tokens = session.query(Token).filter(Token.project_id==project.id).filter(Token.sent_out < Token.max_mints).filter(Token.id.not_in(session.query(Reserve).with_entities(Reserve.token_id).filter(Reserve.project_id == project.id))).all()
+    print("free tokens:", free_tokens)
 
     print(f"Send funds to this address: \n{wallet.payment_addr}")
     import time

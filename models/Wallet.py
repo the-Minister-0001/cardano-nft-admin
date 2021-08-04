@@ -11,6 +11,3 @@ class Wallet(Base):
     payment_vkey = Column(String)
     payment_skey = Column(String)
     payment_addr = Column(String)                          
-                                                           
-    def __repr__(self):                                    
-        return f"<Wallet(vkey={self.payment_vkey})>" 

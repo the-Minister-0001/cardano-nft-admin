@@ -10,4 +10,4 @@ class Reserve(Base):
     id = Column(Integer, primary_key=True)
     project_id = Column(Integer, ForeignKey('projects.id'))
     dust = Column(Integer) # In lovelaces
-    nft_id = Column(Integer, ForeignKey('tokens.id'))
+    token_id = Column(Integer, ForeignKey('tokens.id'))
