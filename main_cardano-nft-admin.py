@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 
 # TODO:
-#   - Separate Policy into Keys, Policy and Keys X Policy with the policy ID
+#   - Don't pass assets to minting, pass mintages # TODO TODO TODO
+#       -> This will be the most important change
 #   - Add documentation
 #   - refactor into multiple files, this is getting out of hand.
-#   - start to persist data in a database
-#   - implement the setup function
+#   - extend the setup function
 #   - Avoid pitfall: Refunding the vending system's own transaction
 #   - requirements.txt
-#   - Refactor NFTs to "asset" which have a max amount and an amount of already minted tokens
-#           This will help to support FT projects, too
+#   - passing session seems dirty, there must be a better way
+#       -> Create "get_session" or something like that just like the network params
+#   - I'm probably using sqlalchemy not according to best practices, I'll need to clean that up
 
 import os
+import copy
 import time
 import itertools
 import json
@@ -146,12 +148,13 @@ def main():
 
     free_tokens = session.query(Token).filter(Token.project_id==project.id).filter(Token.sent_out < Token.max_mints).filter(Token.id.not_in(session.query(Reserve).with_entities(Reserve.token_id).filter(Reserve.project_id == project.id))).all()
 
-    reserve = Reserve()
-    reserve.project_id = project.id
-    reserve.dust = random.randint(2000000, 4000000) # TODO make sure that's not an already occupied value
-    reserve.token_id = random.choice(free_tokens).id
-    session.add(reserve)
-    session.commit()
+    if len(free_tokens) > 1: # leave at least one token with no reservation
+        reserve = Reserve()
+        reserve.project_id = project.id
+        reserve.dust = random.randint(2000000, 4000000) # TODO make sure that's not an already occupied value
+        reserve.token_id = random.choice(free_tokens).id
+        session.add(reserve)
+        session.commit()
 
     free_tokens = session.query(Token).filter(Token.project_id==project.id).filter(Token.sent_out < Token.max_mints).filter(Token.id.not_in(session.query(Reserve).with_entities(Reserve.token_id).filter(Reserve.project_id == project.id))).all()
     print("free tokens:", free_tokens)
@@ -169,6 +172,7 @@ def main():
             wallet,
             policy,
             excess_addr="addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0",
+            session=session,
         )
     except subprocess.CalledProcessError: # If the minting fails, send the ADA to the target wallet as a failsafe
         mint(
@@ -176,17 +180,19 @@ def main():
             wallet,
             policy,
             excess_addr="addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0",
+            session=session,
         )
 
-def re_mint(assets, wallet, policy, excess_addr=""):
+def re_mint(assets, wallet, policy, excess_addr="", session=None):
     if not excess_addr:
         excess_addr = wallet.payment_addr
 
     redirected_assets = []
     for asset in assets:
-        copied_asset = asset.copy()
-        copied_asset['addr'] = wallet.payment_addr
-        redirected_assets.append(copied_asset)
+        detached_asset = session.query(Token).filter(Token.id == asset.id).first()
+        session.expunge(detached_asset)
+        detached_asset.addr = wallet.payment_addr
+        redirected_assets.append(detached_asset)
 
     print("Waiting for ADA input to mint")
     while not query_wallet(wallet):
@@ -194,7 +200,7 @@ def re_mint(assets, wallet, policy, excess_addr=""):
         time.sleep(1)
     print()
     print("Minting with new metadata!")
-    mint(redirected_assets, wallet, policy, excess_addr=wallet.payment_addr)
+    mint(redirected_assets, wallet, policy, excess_addr=wallet.payment_addr, session=session)
 
     print("Waiting for transaction to go through...")
     remint_tx_found = False
@@ -204,19 +210,19 @@ def re_mint(assets, wallet, policy, excess_addr=""):
         utxos = query_wallet(wallet)
         for tx in utxos:
             if policy.policy_id in utxos[tx]["value"]:
-                if all(asset['assetName'] in utxos[tx]["value"][policy.policy_id] for asset in assets):
+                if all(asset.asset_name in utxos[tx]["value"][policy.policy_id] for asset in assets):
                     remint_tx_found = True
     print()
     print("Burning minted tokens")
 
     burn_assets = []
     for asset in redirected_assets:
-        burn_asset = asset.copy()
-        burn_asset['amount'] = -1 * asset['amount']
-        burn_asset['addr'] = excess_addr
+        burn_asset = copy.deepcopy(asset)
+        burn_asset.amount = -1 * asset.amount
+        burn_asset.addr = excess_addr
         burn_assets.append(burn_asset)
 
-    mint(burn_assets, wallet, policy, excess_addr=excess_addr)
+    mint(burn_assets, wallet, policy, excess_addr=excess_addr, session=session)
 
 def setup(engine):
     # Create the working directory if it does not exist
@@ -494,7 +500,7 @@ def create_policy_keys():
     return policy
 
 
-def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
+def mint(assets, wallet, policy, tx_ins=[], excess_addr="", session=None):
     """
     Mints a single transaction
 
@@ -562,43 +568,41 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
     for tx in utxos:
         if tx not in minting_input_transactions:
             continue
-        for asset in utxos[tx]["value"]:
-            if asset == "lovelace":
+        for policy_id in utxos[tx]["value"]:
+            if policy_id == "lovelace":
                 if not "lovelace" in available_resources:
                     available_resources["lovelace"] = 0
                 available_resources["lovelace"] += utxos[tx]["value"]["lovelace"]
             else:
-                for token_name in utxos[tx]["value"][asset]:
-                    if not f"{asset}.{token_name}" in available_resources:
-                        available_resources[f"{asset}.{token_name}"] = 0
-                    available_resources[f"{asset}.{token_name}"] += utxos[tx]["value"][
-                        asset
+                for token_name in utxos[tx]["value"][policy_id]:
+                    if not f"{policy_id}.{token_name}" in available_resources:
+                        available_resources[f"{policy_id}.{token_name}"] = 0
+                    available_resources[f"{policy_id}.{token_name}"] += utxos[tx]["value"][
+                        policy_id
                     ][token_name]
 
     # 2. for all assets required, add the 'amount' to the available resources
     # {'policyId':'', 'assetName':'', 'amount':0, 'metadata':{}, 'addr':''}
     for asset in assets:
-        if not f'{asset["policyId"]}.{asset["assetName"]}' in available_resources:
-            available_resources[f'{asset["policyId"]}.{asset["assetName"]}'] = 0
+        asset_policy = get_asset_policy(asset.id, session) #TODO query policy ID
+        if not f'{asset_policy.policy_id}.{asset.asset_name}' in available_resources:
+            available_resources[f'{asset_policy.policy_id}.{asset.asset_name}'] = 0
 
-        available_resources[f'{asset["policyId"]}.{asset["assetName"]}'] += asset[
-            "amount"
-        ]
+        available_resources[f'{asset_policy.policy_id}.{asset.asset_name}'] += asset.amount
     # 3. list all the output addresses and assign the resources to be sent there
-    out_addresses = set(asset["addr"] for asset in assets)
+    out_addresses = set(asset.addr for asset in assets)
     tx_out = {}
     for addr in out_addresses:
         tx_out[addr] = {}
         for asset in assets:
-            if asset["addr"] == addr:
-                if not f'{asset["policyId"]}.{asset["assetName"]}' in tx_out[addr]:
-                    tx_out[addr][f'{asset["policyId"]}.{asset["assetName"]}'] = 0
-                tx_out[addr][f'{asset["policyId"]}.{asset["assetName"]}'] += asset[
-                    "amount"
-                ]
+            if asset.addr == addr:
+                asset_policy = get_asset_policy(asset.id, session) #TODO query policy ID
+                if not f'{asset_policy.policy_id}.{asset.asset_name}' in tx_out[addr]:
+                    tx_out[addr][f'{asset_policy.policy_id}.{asset.asset_name}'] = 0
+                tx_out[addr][f'{asset_policy.policy_id}.{asset.asset_name}'] += asset.amount
                 available_resources[
-                    f'{asset["policyId"]}.{asset["assetName"]}'
-                ] -= asset["amount"]
+                    f'{asset_policy.policy_id}.{asset.asset_name}'
+                ] -= asset.amount
 
     # 4. calculate the min ada for each address
     for addr in tx_out:
@@ -649,9 +653,10 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
 
     metadata = {"721": {"version": 1}}
     for asset in assets:
-        if not asset["policyId"] in metadata["721"]:
-            metadata["721"][asset["policyId"]] = {}
-        metadata["721"][asset["policyId"]][asset["assetName"]] = asset["metadata"]
+        asset_policy = get_asset_policy(asset.id, session) #TODO query policy ID
+        if not asset_policy.policy_id in metadata["721"]:
+            metadata["721"][asset_policy.policy_id] = {}
+        metadata["721"][asset_policy.policy_id][asset.asset_name] = asset.metadata
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_metadata.json", "w") as f_out:
         json.dump(metadata, f_out, indent=4)
 
@@ -660,10 +665,12 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr=""):
 
     minting_string = ''
     for asset in assets:
+        asset_policy = get_asset_policy(asset.id, session) #TODO query policy ID
         if not minting_string:
-            minting_string = f'{asset["amount"]} {asset["policyId"]}.{asset["assetName"]}'
+            minting_string = f'{asset.amount} {asset_policy.policy_id}.{asset.asset_name}'
         else:
-            minting_string += f'+{asset["amount"]:d} {asset["policyId"]}.{asset["assetName"]}'
+            minting_string += f'+{asset.amount:d} {asset_policy.policy_id}.{asset.asset_name}'
+        # TODO this could be done with '+'.join, right?
         
     process_parameters = [
         config.CLI_PATH,
@@ -854,6 +861,11 @@ def calculate_fee(tx_out_count, tx_in_count, random_id):
 def vend():
     pass
 
+def get_asset_policy(asset_id, session):
+    asset = session.query(Token).filter(Token.id == asset_id).first()
+    project = session.query(Project).filter(Project.id == asset.project_id).first()
+    policy = session.query(Policy).filter(Policy.id == project.policy_id).first()
+    return policy
 
 #############
 ### UTILS ###
