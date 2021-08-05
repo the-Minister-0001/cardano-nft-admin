@@ -11,6 +11,8 @@
 #   - passing session seems dirty, there must be a better way
 #       -> Create "get_session" or something like that just like the network params
 #   - I'm probably using sqlalchemy not according to best practices, I'll need to clean that up
+# BUG TODO:
+#   - Burning one if there are multiple instances of a token seems to not work?
 
 import os
 import copy
@@ -168,7 +170,7 @@ def main():
 
     try:
         re_mint(
-            assets,
+            mintages,
             wallet,
             policy,
             excess_addr="addr_test1qq6szayuhmlh3pt2jvtw50zlpvmxmlfndfr5s86ls90aynhx4vrecn8ys8mdy4jp6xclnxet9h89pyrf2k5gtdnvtjaslxgsc0",
@@ -183,16 +185,15 @@ def main():
             session=session,
         )
 
-def re_mint(assets, wallet, policy, excess_addr="", session=None):
+def re_mint(mintages, wallet, policy, excess_addr="", session=None):
     if not excess_addr:
         excess_addr = wallet.payment_addr
 
-    redirected_assets = []
-    for asset in assets:
-        detached_asset = session.query(Token).filter(Token.id == asset.id).first()
-        session.expunge(detached_asset)
-        detached_asset.addr = wallet.payment_addr
-        redirected_assets.append(detached_asset)
+    redirected_mintages = []
+    for mintage in mintages:
+        detached_mintage = session.query(Mint).filter(Mint.id == mintage.id).first()
+        detached_mintage.addr = wallet.payment_addr
+        redirected_mintages.append(detached_mintage)
 
     print("Waiting for ADA input to mint")
     while not query_wallet(wallet):
@@ -200,7 +201,7 @@ def re_mint(assets, wallet, policy, excess_addr="", session=None):
         time.sleep(1)
     print()
     print("Minting with new metadata!")
-    mint(redirected_assets, wallet, policy, excess_addr=wallet.payment_addr, session=session)
+    mint(redirected_mintages, wallet, policy, excess_addr=wallet.payment_addr, session=session)
 
     print("Waiting for transaction to go through...")
     remint_tx_found = False
@@ -210,19 +211,20 @@ def re_mint(assets, wallet, policy, excess_addr="", session=None):
         utxos = query_wallet(wallet)
         for tx in utxos:
             if policy.policy_id in utxos[tx]["value"]:
-                if all(asset.asset_name in utxos[tx]["value"][policy.policy_id] for asset in assets):
+                asset_names = [return_object[0] for return_object in session.query(Token).filter(Token.id.in_([mintage.token_id for mintage in mintages])).with_entities(Token.asset_name).all()] # TODO this is ugly, split into understandable chunks
+                if all(asset_name in utxos[tx]["value"][policy.policy_id] for asset_name in asset_names):
                     remint_tx_found = True
     print()
     print("Burning minted tokens")
 
-    burn_assets = []
-    for asset in redirected_assets:
-        burn_asset = copy.deepcopy(asset)
-        burn_asset.amount = -1 * asset.amount
-        burn_asset.addr = excess_addr
-        burn_assets.append(burn_asset)
+    burn_mintages = []
+    for mintage in redirected_mintages:
+        burn_mintage = session.query(Mint).filter(Mint.id == mintage.id).first()
+        burn_mintage.amount = -1 * mintage.amount
+        burn_mintage.addr = excess_addr
+        burn_mintages.append(burn_mintage)
 
-    mint(burn_assets, wallet, policy, excess_addr=excess_addr, session=session)
+    mint(burn_mintages, wallet, policy, excess_addr=excess_addr, session=session)
 
 def setup(engine):
     # Create the working directory if it does not exist
@@ -500,7 +502,7 @@ def create_policy_keys():
     return policy
 
 
-def mint(assets, wallet, policy, tx_ins=[], excess_addr="", session=None):
+def mint(mintages, wallet, policy, tx_ins=[], excess_addr="", session=None):
     """
     Mints a single transaction
 
@@ -583,26 +585,28 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr="", session=None):
 
     # 2. for all assets required, add the 'amount' to the available resources
     # {'policyId':'', 'assetName':'', 'amount':0, 'metadata':{}, 'addr':''}
-    for asset in assets:
+    for mintage in mintages:
+        asset = session.query(Token).filter(Token.id == mintage.token_id).first()
         asset_policy = get_asset_policy(asset.id, session) #TODO query policy ID
         if not f'{asset_policy.policy_id}.{asset.asset_name}' in available_resources:
             available_resources[f'{asset_policy.policy_id}.{asset.asset_name}'] = 0
 
-        available_resources[f'{asset_policy.policy_id}.{asset.asset_name}'] += asset.amount
+        available_resources[f'{asset_policy.policy_id}.{asset.asset_name}'] += mintage.amount
     # 3. list all the output addresses and assign the resources to be sent there
-    out_addresses = set(asset.addr for asset in assets)
+    out_addresses = set(mintage.addr for mintage in mintages)
     tx_out = {}
     for addr in out_addresses:
         tx_out[addr] = {}
-        for asset in assets:
-            if asset.addr == addr:
+        for mintage in mintages:
+            if mintage.addr == addr:
+                asset = session.query(Token).filter(Token.id == mintage.token_id).first()
                 asset_policy = get_asset_policy(asset.id, session) #TODO query policy ID
                 if not f'{asset_policy.policy_id}.{asset.asset_name}' in tx_out[addr]:
                     tx_out[addr][f'{asset_policy.policy_id}.{asset.asset_name}'] = 0
-                tx_out[addr][f'{asset_policy.policy_id}.{asset.asset_name}'] += asset.amount
+                tx_out[addr][f'{asset_policy.policy_id}.{asset.asset_name}'] += mintage.amount
                 available_resources[
                     f'{asset_policy.policy_id}.{asset.asset_name}'
-                ] -= asset.amount
+                ] -= mintage.amount
 
     # 4. calculate the min ada for each address
     for addr in tx_out:
@@ -652,11 +656,12 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr="", session=None):
         tx_out_formatted.append(resourcestring)
 
     metadata = {"721": {"version": 1}}
-    for asset in assets:
+    for mintage in mintages:
+        asset = session.query(Token).filter(Token.id == mintage.token_id).first()
         asset_policy = get_asset_policy(asset.id, session) #TODO query policy ID
         if not asset_policy.policy_id in metadata["721"]:
             metadata["721"][asset_policy.policy_id] = {}
-        metadata["721"][asset_policy.policy_id][asset.asset_name] = asset.metadata
+        metadata["721"][asset_policy.policy_id][asset.asset_name] = json.loads(asset.token_metadata)
     with open(f"{config.WORKING_DIRECTORY}/{random_id}_metadata.json", "w") as f_out:
         json.dump(metadata, f_out, indent=4)
 
@@ -664,12 +669,13 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr="", session=None):
         print(policy.policy_script, file=f_out)
 
     minting_string = ''
-    for asset in assets:
+    for mintage in mintages:
+        asset = session.query(Token).filter(Token.id == mintage.token_id).first()
         asset_policy = get_asset_policy(asset.id, session) #TODO query policy ID
         if not minting_string:
-            minting_string = f'{asset.amount} {asset_policy.policy_id}.{asset.asset_name}'
+            minting_string = f'{mintage.amount} {asset_policy.policy_id}.{asset.asset_name}'
         else:
-            minting_string += f'+{asset.amount:d} {asset_policy.policy_id}.{asset.asset_name}'
+            minting_string += f'+{mintage.amount:d} {asset_policy.policy_id}.{asset.asset_name}'
         # TODO this could be done with '+'.join, right?
         
     process_parameters = [
@@ -687,7 +693,7 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr="", session=None):
         "--out-file",
         f"{config.WORKING_DIRECTORY}/{random_id}_free_tx.raw",
     ]
-    if len(assets):
+    if len(mintages):
         process_parameters += [
             "--mint",
             minting_string,
@@ -748,7 +754,7 @@ def mint(assets, wallet, policy, tx_ins=[], excess_addr="", session=None):
         "--out-file",
         f"{config.WORKING_DIRECTORY}/{random_id}_tx.raw",
     ]
-    if len(assets):
+    if len(mintages):
         process_parameters += [
             "--mint",
             minting_string,
