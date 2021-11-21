@@ -10,4 +10,4 @@ class Reserve(Base):
     id = Column(Integer, primary_key=True)
     project_id = Column(Integer, ForeignKey('projects.id'))
     dust = Column(Integer) # In lovelaces
-    token_id = Column(Integer, ForeignKey('tokens.id'))
+    mintage_id = Column(Integer, ForeignKey('mints.id'))
