@@ -218,13 +218,13 @@ def handle_vending(project, session, handled_transactions):
 
     refund_threshhold = 2000000 # if people send less than this, don't refund
 
-    excess_addr = project_wallet.payment_addr
-    if config.EXCESS_ADDR:
-        excess_addr = config.EXCESS_ADDR
-
     project_wallet = session.query(Wallet).filter(Wallet.id == project.wallet_id).first()
     sale_size_ids = session.query(RelSaleSizeProject).filter(RelSaleSizeProject.project_id == project.id).with_entities(RelSaleSizeProject.salesize_id)
     sale_sizes = session.query(SaleSize).filter(SaleSize.id.in_(sale_size_ids)).all()
+
+    excess_addr = project_wallet.payment_addr
+    if config.EXCESS_ADDR:
+        excess_addr = config.EXCESS_ADDR
 
     logger.info(f"Vending, send ADA to {project_wallet.payment_addr}")
     project_policy = session.query(Policy).filter(Policy.id == project.policy_id).first()
@@ -321,17 +321,26 @@ def handle_vending(project, session, handled_transactions):
             min_idx = min(token.start_idx for token in project_tokens.all())
             mintages = []
             while len(mintages) < buyable_tokens:
-                # TODO: map out how many are still available to make this more performant
-                random_token_index = random.randint(min_idx, max_idx)
-                token_type = session.query(Token).filter(Token.start_idx <= random_token_index).filter(Token.end_idx >= random_token_index).first()
+                if config.RANDOMIZE:
+                    random_token_index = random.randint(min_idx, max_idx)
+                    token_type = session.query(Token).filter(Token.start_idx <= random_token_index).filter(Token.end_idx >= random_token_index).first()
+                    if (token_type.start_idx + token_type.sent_out + reserved_amount) > random_token_index: # this token has been minted
+                        continue
+                else:
+                    tokens = session.query(Token).filter(Token.sent_out < 1).order_by(Token.id.asc()).all()
+                    unused_tokens = []
+                    for token in tokens:
+                        already_included = False
+                        for mintage in mintages:
+                            if token.id == mintage.token_id:
+                                already_included = True
+                        if not already_included: unused_tokens.append(token)
+                    token_type = unused_tokens[0]
                 reserved_amount = 0
                 for reservation in reserved_tokens.all():
                     if reservation.token_id == token_type.id:
                         reserved_amount += reservation.amount # TODO use a proper DB query instead of this junk
-                if (token_type.start_idx + token_type.sent_out + reserved_amount) > random_token_index: # this token has been minted
-                    continue
                 else:
-                    token_type.sent_out += 1
                     # TODO check if this one is reserved
                     session.commit()
                     mintage = Mint()
@@ -346,7 +355,11 @@ def handle_vending(project, session, handled_transactions):
         
             # Don't try to mint if there is nothing to mint
             if buyable_tokens:
-                mint(mintages, project_wallet, project_policy, tx_ins=[utxo['tx']], excess_addr=excess_addr, session=session)
+                mint(mintages, project_wallet, project_policy, tx_ins=[utxo['tx']], excess_addr=excess_addr, session=session, apply_royalties=True)
+                for mintage in mintages:
+                    token = session.query(Token).filter(Token.id==mintage.token_id).first()
+                    token.sent_out += 1
+                session.commit()
 
             handled_transactions.append(utxo['tx'])
                 
@@ -372,7 +385,7 @@ def handle_vending(project, session, handled_transactions):
             reservation_token = session.query(Token).filter(Token.id == reserved_mintage.token_id).first()
             reserved_mintage.addr = origin_txs[0]
             reserved_mintage.in_progress = True
-            mint([reserved_mintage], project_wallet, project_policy, tx_ins=[utxo['tx']], excess_addr=excess_addr, session=session)
+            mint([reserved_mintage], project_wallet, project_policy, tx_ins=[utxo['tx']], excess_addr=excess_addr, session=session, apply_royalties=True)
             reserved_mintage.completed = True
             reservation_token.minted += reserved_mintage.amount
             reservation_token.sent_out += reserved_mintage.amount
@@ -729,7 +742,7 @@ def create_policy_keys():
     return policy
 
 
-def mint(mintages, wallet, policy, tx_ins=[], excess_addr="", session=None, extra_lovelace=0, extra_addr=""):
+def mint(mintages, wallet, policy, tx_ins=[], excess_addr="", session=None, extra_lovelace=0, extra_addr="", apply_royalties=False):
     """
     Mints a single transaction
 
@@ -839,6 +852,7 @@ def mint(mintages, wallet, policy, tx_ins=[], excess_addr="", session=None, extr
     for addr in tx_out:
         addr_assets = []
         for asset in tx_out[addr]:
+            if asset == 'lovelace': continue
             addr_assets.append(
                 {"name": asset.split(".")[1], "policyID": asset.split(".")[0]}
             )
@@ -847,6 +861,12 @@ def mint(mintages, wallet, policy, tx_ins=[], excess_addr="", session=None, extr
         min_ada = calculate_min_ada(addr_assets)
         tx_out[addr]["lovelace"] += min_ada
         available_resources["lovelace"] -= min_ada
+
+    if apply_royalties:
+        for royalty in config.ROYALTIES:
+            tx_out[royalty[0]] = tx_out.get(royalty[0], {})
+            tx_out[royalty[0]]['lovelace'] = int(tx_out[royalty[0]].get('lovelace', 0) + royalty[1] * 1000000 * len(mintages))
+            available_resources['lovelace'] -= int(royalty[1] * 1000000 * len(mintages))
 
     if extra_lovelace and extra_addr and extra_lovelace >= 10**6:
         if not extra_addr in tx_out:
